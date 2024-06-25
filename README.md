@@ -31,3 +31,4 @@ This package and the related paper has been written by:
 * [Adam Ginsburg](https://github.com/keflavich)
 * [Ana Duarte-Cabral](https://github.com/anacabral)
 * [Annie Hughes](Annie.Hughes@irap.omp.eu)
+* [Zein Bazzi](https://github.com/Zeinbazzi)
