@@ -3,14 +3,130 @@ The SCIMES core package
 """
 import numpy as np
 import random
-from itertools import combinations, cycle
+import matplotlib
+import itertools
+from itertools import cycle
 from matplotlib import pyplot as plt
 from astropy.io import fits
-from astropy.table import Column
 from sklearn.metrics import silhouette_score
-#from sklearn.manifold import spectral_embedding
-from old_spectral_embedding import spectral_embedding
-from sklearn.cluster import k_means
+from sklearn.manifold import spectral_embedding
+from sklearn.manifold import SpectralEmbedding
+from sklearn.cluster import k_means, MiniBatchKMeans
+from scipy.ndimage.measurements import label
+import matplotlib.patches as patches
+from pdb import set_trace as stop
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
+
+
+def aff_matrix(num, trk, allleavidx, allbrcidx, brclevels, dictchildrens, props):
+
+    """
+    Generate the affinity matrices.
+    
+    Parameters
+    -----------
+
+    num: int
+        Number of non isolated leaves.
+
+    trk: int
+        Dummy index of the trunk.
+
+    allbrcidx: list
+        List of all branches (parents) 
+        indexes within the dendrogram.
+
+    brclevels: list
+        Dendrogram levels of all branches.
+
+    dictchildrens: dictionary
+        Descendants of all branches within
+        the dendrogram.
+
+    props: list of lists
+        Properties of all leaf parents and
+        ancestors within the dendrogram.
+        
+    Return
+    -------
+
+    WAs: numpy array
+        Clustering criteria affinity matrices.
+
+    """
+    
+
+    Widx = np.zeros((num,num), dtype='int')+trk
+    WAs = np.zeros((len(props),num,num))
+
+    brclevels = np.asarray(brclevels)
+    allbrcidx = np.asarray(allbrcidx)
+    allleavidx = np.asarray(allleavidx)
+    allleavpos = np.arange(len(allleavidx))
+
+
+    """
+    for l in np.unique(brclevels):
+
+        lbrcidx = allbrcidx[brclevels == l]
+
+        for p in lbrcidx:
+
+            pleavidx = np.asarray(dictchildrens[str(p)])
+            pleavpos = allleavpos[np.in1d(allleavidx,pleavidx)]
+
+            x,y = np.meshgrid(pleavpos,pleavpos)
+            Widx[x,y] = p
+    """
+
+    # Convert to numpy arrays for efficient operations
+    allbrcidx = np.array(allbrcidx)
+    allleavidx = np.array(allleavidx)
+    allleavpos = np.arange(len(allleavidx))
+
+    # Sort indices by levels for efficient iteration
+    sort_idx = np.argsort(brclevels)
+    brclevels = np.array(brclevels)[sort_idx]
+    allbrcidx = allbrcidx[sort_idx]
+
+    # Initialize matrices
+    WAs = np.zeros((len(props), num, num))
+    Widx = np.zeros((num, num), dtype=int) + trk
+
+    # Precompute descendant positions
+    desc_positions = {str(p): allleavpos[np.in1d(allleavidx, np.array(dictchildrens[str(p)]))] for p in allbrcidx}
+
+    '''
+    def update_affinity_matrices(p, desc_positions, Widx):
+        pleavpos = desc_positions[str(p)]
+        x, y = np.meshgrid(pleavpos, pleavpos)
+        Widx[x, y] = p
+
+
+    # Parallelize the loop
+    Parallel(n_jobs=-1, verbose = 11)(delayed(update_affinity_matrices)(p, desc_positions, Widx) for p in allbrcidx)
+    '''
+    for p in tqdm(allbrcidx, desc="Affinity Matrices", total=len(allbrcidx)):
+        pleavpos = desc_positions[str(p)]
+        x, y = np.meshgrid(pleavpos, pleavpos)
+        Widx[x, y] = p
+        
+    Widx[np.diag_indices(num)] = 0
+
+    # Populate matrices
+    for j, prop in enumerate(props):
+        prop = np.array(prop)
+        Wprop = prop[Widx.ravel()].reshape((num, num))
+        np.fill_diagonal(Wprop, 0)  # Zero out diagonal
+        WAs[j, :, :] = Wprop
+
+
+    return WAs
+
+
+
 
 def mat_smooth(Mat, S2Nmat, s2nlim = 3, scalpar = None, lscal = False):
     """
@@ -58,15 +174,20 @@ def mat_smooth(Mat, S2Nmat, s2nlim = 3, scalpar = None, lscal = False):
         if not np.isnan(np.median(S2Nmat)):
 
             sMat = Mat[S2Nmat > s2nlim]
+            sS2Nmat = S2Nmat[S2Nmat > s2nlim]
             Aff = np.unique(sMat.ravel())[1::]
             psigmas = (Aff+np.roll(Aff,-1))/2
-                
             psigmas = psigmas[1:-1]        
 
             diff = np.roll(Aff,-1)-Aff                
             diff = diff[1:-1]
 
             sel_diff_ind = np.argmax(diff)
+
+            # Check at which SnR the scalpar was found
+            ss2n = sS2Nmat[np.argmin(np.abs(sMat - psigmas[sel_diff_ind]))]
+
+            print("-- Scaling parameter found at SnR ~ %f" % ss2n)
 
         else:
 
@@ -82,6 +203,7 @@ def mat_smooth(Mat, S2Nmat, s2nlim = 3, scalpar = None, lscal = False):
             sel_diff_ind = np.min(np.argsort(diff)[::-1][0:5])
 
         sigma = psigmas[sel_diff_ind]**2
+
 
         # New method:
         # larger difference range
@@ -117,90 +239,6 @@ def mat_smooth(Mat, S2Nmat, s2nlim = 3, scalpar = None, lscal = False):
     return NM, sigma
 
 
-def aff_matrix(num, trk, allleavidx, allbrcidx, brclevels, dictchildrens, props):
-
-    """
-    Generate the affinity matrices.
-    
-    Parameters
-    -----------
-
-    num: int
-        Number of non isolated leaves.
-
-    trk: int
-        Dummy index of the trunk.
-
-    allbrcidx: list
-        List of all branches (parents) 
-        indexes within the dendrogram.
-
-    brclevels: list
-        Dendrogram levels of all branches.
-
-    dictchildrens: dictionary
-        Descendants of all branches within
-        the dendrogram.
-
-    props: list of lists
-        Properties of all leaf parents and
-        ancestors within the dendrogram.
-        
-    Return
-    -------
-
-    WAs: numpy array
-        Clustering criteria affinity matrices.
-
-    """
-    
-    print("- Creating affinity matrices")
-
-    Widx = np.zeros((num,num), dtype='int')+trk
-    WAs = np.zeros((len(props),num,num))
-
-    brclevels = np.asarray(brclevels)
-    allbrcidx = np.asarray(allbrcidx)
-    allleavidx = np.asarray(allleavidx)
-    allleavpos = np.arange(len(allleavidx))
-
-
-    """
-    for l in np.unique(brclevels):
-
-        lbrcidx = allbrcidx[brclevels == l]
-
-        for p in lbrcidx:
-
-            pleavidx = np.asarray(dictchildrens[str(p)])
-            pleavpos = allleavpos[np.in1d(allleavidx,pleavidx)]
-
-            x,y = np.meshgrid(pleavpos,pleavpos)
-            Widx[x,y] = p
-    """
-
-    
-    allbrcidx = allbrcidx[np.argsort(brclevels)]
-
-    for p in allbrcidx:
-
-        pleavidx = np.asarray(dictchildrens[str(p)])
-        pleavpos = allleavpos[np.in1d(allleavidx,pleavidx)]
-        x,y = np.meshgrid(pleavpos,pleavpos)
-        Widx[x,y] = p
-
-    Widx[np.diag_indices(num)] = 0
-
-    for j,prop in enumerate(props):
-
-        prop = np.asarray(prop)
-        Wprop = prop[Widx.ravel()].reshape([num,num])
-        Wprop[np.diag_indices(num)] = 0
-        WAs[j,:,:] = Wprop
-
-    return WAs
-
-
 
 def guessk(Mat, thresh = 0.2):
 
@@ -232,6 +270,7 @@ def guessk(Mat, thresh = 0.2):
     M[M > 0] = 1
 
 
+    """
     np.fill_diagonal(M, 1)
     guess_clusters = np.zeros(M.shape[0])
 
@@ -249,22 +288,22 @@ def guessk(Mat, thresh = 0.2):
             kguess = kguess+1
 
         i = i + curr
-
     """
-    np.fill_diagonal(M, 0)
-    D = np.zeros(M.shape)
 
-    for i in range(D.shape[0]):
-        D[i,i] = sum(M[i,:])
+    np.fill_diagonal(M, 1)
 
-    Lap = D - M
-    eigv = np.abs(np.linalg.eigvals(Lap))
+    # Counts how many "blocks" are in the matrix
+    s = np.array([[0,1,0],[1,1,1],[0,1,0]])
+    labarr, kguess = label(M, structure=s)
 
-    kguess2 = len(np.where(eigv == 0)[0])    
+    # Leaves are not counted, remove them from the count
+    _, counts = np.unique(labarr, return_counts=True)
+    kguess -= np.sum(counts == 1)
 
-    """
-            
-    return kguess
+    # At least one cluster
+    kguess = max([kguess,1])
+
+    return kguess, labarr
 
 
 
@@ -319,7 +358,7 @@ def clust_cleaning(allleavidx, allclusters, dictpars, dictchilds, dictancests, s
     for j,ucluster in enumerate(uclusters):
         rallclusters[allclusters == ucluster] = j
 
-    for cluster in set(rallclusters):
+    for cluster in tqdm(set(rallclusters),desc="Cluster cleaning"):
 
         # Selecting the cluster
         clust_idx = rallclusters == cluster
@@ -447,9 +486,81 @@ def make_asgncube(dendro, asgn_idx, header, collapse = True):
 
 
 
+def plotmatclusts(ax, clusters, allleavidx, mulleavidx, dictchilds,\
+                    cguess, cleaves, cbranches):
+
+    """
+    Plot the clusters as rectangles on the affinity
+    matrices
+
+    ax: 'matplotlib.axes._subplots.AxesSubplot' instance
+        Axis where the affinity matrix is plotted on.
+
+    clusters: list of integer
+        Identified clusters.
+
+    allleavidx: list
+        List of all leaf indexes within the
+        dendrogram.
+
+    mulleavidx: list
+        List of leaf indexes within the
+        dendrogram that descend from a
+        branch with more than 2 leaves.
+
+    dictchilds: dictionary
+        Children of all branches
+        within the dendrogram.
+
+    cleaves: bool
+        Are clusters leaves?
+
+    cbranches: bool
+        Are clusters branches?
+    """
+
+    r = lambda: random.randint(0,255)
+
+    ccols = []
+
+    # Do not sort the clusters
+    #ids = np.unique(clusters, return_index=True)[1]
+    #uclusters = [clusters[i] for i in sorted(ids)]
+
+    uclusters, ucounts = np.unique(clusters, return_counts=True)
+    if cbranches == False:
+        uclusters = uclusters[ucounts != 1]
+    if cguess:
+        uclusters = uclusters[uclusters != 0]
+
+    for c in uclusters:
+
+        ccol = '#%02X%02X%02X' % (r(),r(),r())
+        ccols.append(ccol)
+
+        if cguess:
+            cids = np.where(clusters == c)[0]
+            ci, co = cids[0], cids[-1]+1
+
+        if cleaves:
+            cids = np.array(mulleavidx)[clusters == c]
+            ci, co = allleavidx.index(cids[0]), allleavidx.index(cids[-1])
+
+        if cbranches:
+            cids = dictchilds[str(c)]
+            ci, co = allleavidx.index(cids[0]), allleavidx.index(cids[-1])
+
+        rect = patches.Rectangle((ci,ci),co-ci,co-ci,edgecolor=ccol,facecolor='none',lw=2)
+
+        ax.add_patch(rect)
+
+    return ccols
+
+
+
 
 def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars, user_iter, 
-    save_isol_leaves, save_clust_leaves, save_branches, blind, rms, s2nlim, locscal):
+    save_isol_leaves, save_clust_leaves, save_branches, blind, rms, s2nlim, locscal, show_affinity, n_jobs):
 
     """
     SCIMES main function. It collects parents/children
@@ -524,7 +635,7 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
         Noise level of the observation. Necessary tolist
         calculate the scaling parameter above a certain
         signal-to-noise ratio.
-
+    
     s2nlim: int or float
         Signal-to-noise limit above which the
         scaling parameter is calculated. Needed
@@ -538,6 +649,10 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
         Smooth the affinity matrices using a local
         scaling technique.
 
+    n_jobs: int
+        Number of cores engaged in the computation. 
+        Initially set = -1 which means all cores are
+        being used.
 
     Return
     -------
@@ -563,8 +678,6 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
         Silhouette of the best cluster configuration
 
     """
-
-    print('- Collecting connectivity information')
 
     # Collecting all connectivity and other information into more handy lists
     all_structures_idx = np.arange(len(catalog[criteria[0]].data), dtype='int')
@@ -595,7 +708,7 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
 
     s2ns = []
 
-    for structure_idx in all_structures_idx:
+    for structure_idx in tqdm(all_structures_idx, desc="Affinity matrices preparation"):
 
         s = dendrogram[structure_idx]
         all_levels.append(s.level)
@@ -651,7 +764,7 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
             all_children.append(children)
 
             # Trunk branches
-            if s.parent == None:
+            if s.parent is None:
 
                 trunk_brs_idx.append(s.idx)
                 all_leav_idx = all_leav_idx + children
@@ -695,17 +808,18 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
 
 
     # Generating affinity matrices if not provided
-    if user_ams == None:
+    if user_ams is None:
 
         AMs = aff_matrix(len(all_leav_idx), len(catalog[criteria[0]].data), \
             all_leav_idx, all_brc_idx, brc_levels, dict_children, props)
 
-        if blind == False:
+        if show_affinity:
 
             # Showing all affinity matrices
             for i, crit in enumerate(criteria):
 
-                plt.matshow(AMs[i,:,:])
+                plt.figure()
+                plt.imshow(AMs[i,:,:], interpolation='nearest')
                 plt.title('"'+crit+'" affinity matrix', fontsize = 'medium')
                 plt.xlabel('leaf index')
                 plt.ylabel('leaf index')    
@@ -762,7 +876,11 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
         AM = AM*AMc
         escalpars.append(sigma)
             
-    
+    # Forcing affinities below 1e-14 to be equal to 1e-14.
+    # This step is necessary to mantain a fully connected graph.
+    # This values is taken from Orion.
+    AM[AM < 1e-14] = 1e-14
+
     # Making the reduced affinity matrices
     mul_leav_mat = []
     for mli in mul_leav_idx:
@@ -771,11 +889,11 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
     mul_leav_mat = np.asarray(mul_leav_mat)
     rAM = AM[mul_leav_mat,:]
     rAM = rAM[:,mul_leav_mat]
-
-    if blind == False:
+    if show_affinity:
             
         # Showing the final affinity matrix
-        plt.matshow(AM)
+        plt.figure()
+        plt.imshow(AM, interpolation='nearest')
         plt.colorbar()
         plt.title('Final Affinity Matrix')
         plt.xlabel('leaf index')
@@ -786,9 +904,10 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
     # if not provided
 
     if user_k == 0:   
-        kg = guessk(rAM)
+        kg, gAM = guessk(rAM)
     else:
         kg = user_k-len(two_clust_idx)
+        gAM = None
 
     print("-- Guessed number of clusters = %i" % (kg+len(two_clust_idx)))
     
@@ -804,44 +923,113 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
                 
         clust_configs = []
 
-        for ks in range(min_ks,max_ks):
 
+
+# Define a function that performs the spectral embedding and k-means clustering
+
+        
+        def process_ks(ks, user_iter):
             try:
+                embedding = SpectralEmbedding(n_components=ks, random_state=222,
+                                            eigen_tol=0.0, eigen_solver='arpack',
+                                            affinity='precomputed', n_jobs=-1)
                 
-                evecs = spectral_embedding(rAM, n_components=ks,
-                                        eigen_solver='arpack',
-                                        random_state=222,
-                                        eigen_tol=0.0, drop_first=False)
+                evecs = embedding.fit_transform(rAM)
+
                 _, all_clusters, _ = k_means(evecs, ks, random_state=222, n_init=user_iter)
-                
+
                 sil = silhouette_score(evecs, np.asarray(all_clusters), metric='euclidean')
 
-                clust_configs.append(all_clusters)
+                return sil, all_clusters
 
             except np.linalg.LinAlgError:
+                return 0, []
 
-                sil = 0
-                
+
+        # Parallelize the loop
+        sils = []
+        clust_configs = []
+        results = Parallel(n_jobs=n_jobs, verbose = 10)(delayed(process_ks)(ks, user_iter) for ks in range(min_ks, max_ks))
+
+        # Extract silhouette scores and cluster configurations from results
+        for sil, clusters in results:
             sils.append(sil)
-                    
+            clust_configs.append(clusters)
+        
+
         # Use the best cluster number to generate clusters                    
         best_ks = sils.index(max(sils))+min_ks
         print("-- Best cluster number found through SILHOUETTE (%f)= %i" % (max(sils), best_ks+len(two_clust_idx)))        
         silhoutte = max(sils)
         
         all_clusters = clust_configs[np.argmax(sils)]
+
+        # TEST 
+        #from sklearn.cluster import SpectralClustering
+
+        #sc = SpectralClustering(n_clusters=41, random_state=222, assign_labels='cluster_qr', affinity='precomputed')
+        #sc.fit(rAM)
+        #all_clusters = sc.labels_.copy()
+
+        #from sklearn.cluster import AffinityPropagation
+        
+        #ap = AffinityPropagation(random_state=222,affinity='precomputed')
+        #ap.fit(rAM)
+        #all_clusters = ap.labels_.copy()
                         
     else:
 
         print("-- Not necessary to cluster")
-        all_clusters = np.zeros(len(all_leaves_idx), dtype = np.int32)
+        all_clusters = np.zeros(len(all_leav_idx), dtype = np.int32)
 
     clust_branches = clust_cleaning(mul_leav_idx, all_clusters, dict_parents, dict_children, dict_ancestors, savebranches = save_branches)
     clusts = clust_branches + two_clust_idx
+    clusts = sorted(clusts)
 
     print("-- Final cluster number (after cleaning) %i" % len(clusts))
     
+    
+    # Show clustered affinity matrix, before and after cleaning
+    if blind == False:
 
+        fig, axs = plt.subplots(1,3,figsize=(14,5))
+        axs = axs.ravel()
+
+        if gAM is None:
+            print("USER_K triggered: guessed clusters not shown")
+
+        axs[0].imshow(AM, cmap='Greys_r', interpolation='nearest')
+        axs[0].set_title('Guessed clusters')
+        axs[0].set_xlabel('leaf index')
+        axs[0].set_ylabel('leaf index')
+
+        if gAM is not None:
+            plotmatclusts(axs[0], gAM, all_leav_idx, mul_leav_idx, dict_children,\
+                            True, False, False)
+
+        axs[1].imshow(AM, cmap='Greys_r', interpolation='nearest')
+        axs[1].set_title('Clusters before cleaning')
+        axs[1].set_xlabel('leaf index')
+        axs[1].set_ylabel('leaf index')
+
+        plotmatclusts(axs[1], all_clusters, all_leav_idx, mul_leav_idx, dict_children,\
+                        False, True, False)
+
+        axs[2].imshow(AM, cmap='Greys_r', interpolation='nearest')
+        axs[2].set_title('Clusters after cleaning')
+        axs[2].set_xlabel('leaf index')
+
+        colors = plotmatclusts(axs[2], clusts, all_leav_idx, mul_leav_idx, dict_children,\
+                        False, False, True)
+
+        fig.tight_layout()
+
+    else:
+
+        colors = []
+            
+        
+    
     # Calculate the silhouette after cluster cleaning
     #fclusts_idx = np.ones(len(mul_leav_idx))
     fclusts_idx = -1*all_clusters
@@ -866,14 +1054,21 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
     for oldclust in oldclusts:
         fclusts_idx[fclusts_idx == oldclust] = np.max(fclusts_idx)+1
 
-    evecs = spectral_embedding(rAM, n_components=ks,
-                            eigen_solver='arpack',
-                            random_state=222,
-                            eigen_tol=0.0, drop_first=False)
+    '''
+    embedding = SpectralEmbedding(n_components=ks, random_state=222,
+                                eigen_tol=0.0, eigen_solver='arpack',
+                                affinity='precomputed', n_jobs=-1)
+    evecs = embedding.fit_transform(rAM)
+
+    # evecs = spectral_embedding(rAM, n_components=ks,
+    #                         eigen_solver='arpack',
+    #                         random_state=222,
+    #                         eigen_tol=0.0, drop_first=False)
+    
     sil = silhouette_score(evecs, fclusts_idx, metric='euclidean')
 
-    print("-- Final clustering configuration silhoutte %f" % sil)
-
+    print("-- Final clustering configuration silhouette %f" % sil)
+    '''
 
     all_struct_types = np.asarray(all_struct_types)
     all_struct_parents = np.asarray(all_struct_parents)
@@ -907,7 +1102,7 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
 
         print("SAVE_CLUST_LEAVES triggered. Unclustered leaves added.")
         print("-- Total cluster number %i" % len(clusts))
-    
+
 
     # Update the catalog with new information
     catalog['parent'] = all_struct_parents
@@ -915,7 +1110,12 @@ def cloudstering(dendrogram, catalog, criteria, user_k, user_ams, user_scalpars,
     catalog['n_leaves'] = nleaves
     catalog['structure_type'] = all_struct_types
 
-    return clusts, catalog, AMs, escalpars, silhoutte 
+
+    # Save also the S2N matrix
+    S2Nmat = S2Nmat.reshape([1,S2Nmat.shape[0],S2Nmat.shape[1]])
+    AMs = np.concatenate([AMs, S2Nmat], axis=0)
+
+    return clusts, catalog, AMs, escalpars, silhoutte, colors, n_jobs
 
 
     
@@ -1043,8 +1243,8 @@ class SpectralCloudstering(object):
     def __init__(self, dendrogram, catalog, header, criteria = ['volume', 'luminosity'],
                  user_k = None, user_ams = None, user_scalpars = None, user_iter = None,
                  save_isol_leaves = False, save_clust_leaves = False, save_branches = False, 
-                 save_all_leaves = False, save_all = False, blind = False, rms = np.nan, s2nlim = 3, 
-                 locscaling = False):
+                 save_all_leaves = False, save_all = False, n_jobs = -1, blind = False, rms = np.nan, s2nlim = 3, 
+                 locscaling = False, show_affinity = True):
 
         self.dendrogram = dendrogram
         self.header = header
@@ -1066,7 +1266,10 @@ class SpectralCloudstering(object):
         if ('volume' not in catalog.colnames) and ('volume' in criteria):
             print("WARNING: adding volume = pi * radius^2 * v_rms to the catalog.")
             catalog['volume'] = np.pi*catalog['radius']**2*catalog['v_rms']
-            
+        if ('area' not in catalog.colnames) and ('area' in criteria):
+            print("WARNING: adding area = pi * radius^2 to the catalog.")
+            catalog['area'] = np.pi*catalog['radius']**2
+
         if len(criteria) > 1:
             print("WARNING: clustering will be performed on the Aggregated matrix")
 
@@ -1094,24 +1297,32 @@ class SpectralCloudstering(object):
         self.blind = blind
         self.rms = rms
         self.s2nlim = s2nlim
+        self.show_affinity = show_affinity
+        self.n_jobs = n_jobs
 
-        # Default colors in case plot_connected_colors is called before showdendro
-        self.colors = cycle('rgbcmyk')
+        self.clusters, self.catalog, self.affmats, self.escalpars, self.silhouette, self.colors, self.n_jobs = cloudstering(
+                                                                                                self.dendrogram,
+                                                                                                catalog,
+                                                                                                self.criteria,
+                                                                                                self.user_k, 
+                                                                                                self.user_ams, 
+                                                                                                self.user_scalpars, 
+                                                                                                self.user_iter,
+                                                                                                self.save_isol_leaves, 
+                                                                                                self.save_clust_leaves,
+                                                                                                self.save_branches,
+                                                                                                self.blind, 
+                                                                                                self.rms, 
+                                                                                                self.s2nlim,
+                                                                                                self.locscaling,
+                                                                                                self.show_affinity,
+                                                                                                self.n_jobs
+                                                                                                )
 
-        self.clusters, self.catalog, self.affmats, self.escalpars, self.silhouette = cloudstering(self.dendrogram,
-                                                                                        catalog,
-                                                                                        self.criteria,
-                                                                                        self.user_k, 
-                                                                                        self.user_ams, 
-                                                                                        self.user_scalpars, 
-                                                                                        self.user_iter,
-                                                                                        self.save_isol_leaves, 
-                                                                                        self.save_clust_leaves,
-                                                                                        self.save_branches,
-                                                                                        self.blind, 
-                                                                                        self.rms, 
-                                                                                        self.s2nlim,
-                                                                                        self.locscaling)
+
+        # Default colors in case plot_connected_colors is called before showdendro and blind=True
+        if len(self.colors) == 0:
+            self.colors = itertools.cycle('gbcmyk')
         
         print("Generate assignment cubes...")
         # Automatically generate assignment cubes
@@ -1126,7 +1337,7 @@ class SpectralCloudstering(object):
 
 
 
-    def showdendro(self, cores_idx=[], savefile=None):
+    def showdendro(self, clusters=[], savefile=None, scale = 'log',xlim = None ,ylim = None):
         
         """
 
@@ -1137,41 +1348,37 @@ class SpectralCloudstering(object):
         """
 
         dendro = self.dendrogram
-        if len(cores_idx) == 0:
-            cores_idx = self.clusters
-
-        # For the random colors
-        r = lambda: random.randint(0,255)
+        if len(clusters) == 0:
+            clusters = self.clusters
                  
         p = dendro.plotter()
 
         fig = plt.figure(figsize=(14, 8))
-        ax = fig.add_subplot(111)
-                
-        #ax.set_yscale('log')
-                
-        cols = []
-        
-        # Plot the whole tree
-
-        p.plot_tree(ax, color='black')
-
-        for i in range(len(cores_idx)):
-
-            col = '#%02X%02X%02X' % (r(),r(),r())
-            cols.append(col)
-            p.plot_tree(ax, structure=[dendro[cores_idx[i]]], color=cols[i], lw=3)
-
-        ax.set_title("Final clustering configuration")
-
+        ax = fig.add_subplot(111)    
+        ax.set_yscale(scale)
+        if ylim != None:
+            ax.set_ylim(ylim)
+        if xlim != None:
+            ax.set_xlim(xlim)
+        ax.set_title("configuration")
         ax.set_xlabel("Structure")
         ax.set_ylabel("Flux")
-        
-        self.colors = cols
+
+        mcols = len(clusters) - len(self.colors)
+        if mcols > 0:
+            r = lambda: random.randint(0,255)
+            self.colors = self.colors + ['#%02X%02X%02X' % (r(),r(),r()) for i in range(mcols)]
+
+        # Plot the whole tree
+        p.plot_tree(ax, color='black')
+
+        for cluster, color in zip(clusters, self.colors):
+            p.plot_tree(ax, structure=[dendro[cluster]], color=color, lw=3)
 
         if savefile:
             fig.savefig(savefile)
-        
+
+        return fig
 
 
 
