@@ -18,7 +18,6 @@ Please report issues via the [GitHub issue tracker](https://github.com/Astroua/s
 Changes
 ----------
 
-- The code uses a newer Sklearn module.
 - Parallel processing works now. SpectralCloudstering automatically specifies `n_jobs=-1` to make use of all cores.
 - `tqdm` module is required and used for tracing the progress of SCIMES.
 - Uses scikit-learn instead of a deprecated version of sklearn.
