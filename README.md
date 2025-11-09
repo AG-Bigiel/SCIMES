@@ -6,7 +6,9 @@ The "Spectral Clustering for Interstellar Molecular Emission Segmentation" modul
 Documentation
 -------------
 
-For information on installing and using ``SCIMES``, please visit [http://scimes.readthedocs.org/](http://scimes.readthedocs.org/)
+-  For information on installing and using ``SCIMES``, please visit [http://scimes.readthedocs.org/](http://scimes.readthedocs.org/)
+-  If you are installing this version, use the following command: pip install "git+https://github.com/AG-Bigiel/SCIMES.git@Bazzi_JWST"
+-  Please cite "Colombo et al. 2015" and "Bazzi et al. 2025b" for credits.
 
 Reporting issues
 ----------------
